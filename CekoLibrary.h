@@ -40,8 +40,8 @@
 // defines 
     // name space 
         using namespace std;
-        using namespace std::this_thread; // sleep_for, sleep_until
-        using namespace std::chrono;      // nanoseconds, system_clock, seconds  
+        using namespace this_thread; // sleep_for, sleep_until
+        using namespace chrono;      // nanoseconds, system_clock, seconds  
 
     // Loop 
         #define Loop_           { int Start_Value = 1; int End_Value = 
@@ -200,7 +200,7 @@
 
 
 
-// function declares 
+// function declares and variables
     void            ClearScreen                ();
     streamsize      FlushCin                   ();
     void            Pause                      ();
@@ -219,12 +219,14 @@
     string          EverythingUpTo             ( char end_symbol, istream& input_stream);
     string          EverythingUpTo             ( char end_symbol);
     void            EndProgram                 ();
-    void            Poke                       (string id_);
+    void            Poke                       ( string id_ );
     istream&        StreamFailed               ( istream& input_stream );
     bool            DidStreamFail              ( istream& input_stream );
     bool            EndOfStream                ( istream& input_stream );
     bool            StreamMatchesString        ( istream& input_stream, string  input_string );
+    template <class ANYTYPE> string          Type(ANYTYPE input);
     template <class ANYTYPE> string AsString(const ANYTYPE& input);
+    pthread_mutex_t mutex_for_output = PTHREAD_MUTEX_INITIALIZER;
     
 
 ////////////////////////
@@ -262,35 +264,36 @@
             // example usage:
                 // int i = 42;
                 // // string is the return type of the lambda function
-                // auto function_ptr_1 = convertToFuncPtr<string()>([&]{std::cout << i; return "hello;";});
+                // auto function_ptr_1 = convertToFuncPtr<string()>([&]{cout << i; return "hello;";});
             template<typename Callable>
             union storage
                 {
                     storage() {}
-                    std::decay_t<Callable> callable;
+                    decay_t<Callable> callable;
                 };
-
+            
             template<int, typename Callable, typename Ret, typename... Args>
-            auto internalConversionToFuncPtr(Callable&& c, Ret (*)(Args...))
+            auto internalConversionToFuncPtr(Callable&& a_callable, Ret (*)(Args...))
                 {
                     static bool used = false;
-                    static storage<Callable> s;
-                    using type = decltype(s.callable);
+                    static storage<Callable> a_storage_of_callable;
+                    using type = decltype(a_storage_of_callable.callable);
 
-                    if(used)
-                        s.callable.~type();
-                    new (&s.callable) type(std::forward<Callable>(c));
+                    if(used) {
+                        a_storage_of_callable.callable.~type();
+                    }
+                    new (&a_storage_of_callable.callable) type(forward<Callable>(a_callable));
                     used = true;
 
                     return [](Args... args) -> Ret {
-                        return Ret(s.callable(std::forward<Args>(args)...));
+                        return Ret(a_storage_of_callable.callable(forward<Args>(args)...));
                     };
                 }
 
             template<typename RETURN_TYPE, int N = 0, typename Callable>
             RETURN_TYPE* convertToFunctionPointer(Callable&& c)
                 {
-                    return internalConversionToFuncPtr<N>(std::forward<Callable>(c), (RETURN_TYPE*)nullptr);
+                    return internalConversionToFuncPtr<N>(forward<Callable>(c), (RETURN_TYPE*)nullptr);
                 }
 
     // Operator Overloads
@@ -535,14 +538,14 @@
                         //         #include <ios>
                         //         #include <istream>
                         //         #include <limits>
-                        std::streamsize num_of_chars_discarded = 0;
+                        streamsize num_of_chars_discarded = 0;
                         if     ( always_discard 
-                            || (    input_stream.rdbuf()->sungetc() != std::char_traits<ANYTYPE>::eof()
+                            || (    input_stream.rdbuf()->sungetc() != char_traits<ANYTYPE>::eof()
                                  && input_stream.get()              != input_stream.widen ( '\n' )       ) )
                         {
                                 // The stream is good, and we haven't
                                 // read a full line yet, so clear it out
-                                input_stream.ignore ( std::numeric_limits<std::streamsize>::max(), input_stream.widen ( '\n' ) );
+                                input_stream.ignore ( numeric_limits<streamsize>::max(), input_stream.widen ( '\n' ) );
                                 num_of_chars_discarded = input_stream.gcount();
                         }
                         return num_of_chars_discarded;
@@ -1570,12 +1573,13 @@
                         output << input;
                         return output.str();
                     }
-        // Show 
+        // Show
+            #define ThreadSafeCout(ARGS) {stringstream output; output << ARGS; cout << output.str(); };
             template<class ANYTYPE> string Show(ANYTYPE input)
-                        {
-                            cout << VisualFormat(input);
-                            return VisualFormat(input);
-                        }
+                {
+                    cout << VisualFormat(input);
+                    return VisualFormat(input);
+                }
         // Ask() basic types 
             string          Ask                        (string question_        )
                 {
@@ -1713,24 +1717,71 @@
                     } 
                     Error( "Sorry I dont see that file, please enter another file name\n");
                 }
-
         // Threads
-            template <class ANY_OUTPUT_TYPE, class ANY_INPUT_TYPE>
-            class Task
+            // 
+            // This is a function that is given to 
+            // 
+            void* thread_stub(void* context)
                 {
-                    public:
+                    // context is static_cast<void*>(&f) below. We reverse the cast to
+                    // void* and call the function object.
+                    function<void*()>& func = *static_cast<function<void*()>*>(context);
+                    return func();
+                }
+            template <class ANY_OUTPUT_TYPE, class ANY_INPUT_TYPE>
+            class TaskClass 
+                {
+                // summary/explaination
+                    // What is this used for?
+                        // if you want to run a function on a thread, and you don't want any segfaults
+                        // this class makes input/output for threaded functions easy
+                        // this class makes sure the arguments exist for the whole time that the thread exists (very importatnt)
+                        // this class works with lambdas as well as normal functions
+                    // How do I use it?
+                        // auto immaFunction = function<int(string)>([&](string input_string)
+                        //     {
+                        //          cout << "I received this as an argument " << input_string << "\n"; 
+                        //          return 69;
+                        //     }
+                        // string the_input = "Hello World";
+                        // auto a_task = Task(immaFunction, the_input);
+                        // int output_of_task = a_task.WaitForCompletion();
+                    // Caveats
+                        // The argument must have a copy constructor and a default (empty) constructor
+                        // If the class you're using doesn't have those, then pass a pointer, or create a wrapper class that does have those
+                    // How does it work?
+                        // this class essentially contains 
+                            // 1. a function 
+                            // 2. a copy of the arguments for that function 
+                            // 3. the output of the function
+                            // 4. a thread id for the thread the function is being run on
+                        // it wraps the functions it's given and then passes the wrapper function to the thread
+                public:
                     // Data
                         pthread_t thread;
                         ANY_OUTPUT_TYPE (*thread_function)(ANY_INPUT_TYPE argument);
+                        function<ANY_OUTPUT_TYPE(ANY_INPUT_TYPE argument)> lambda_thread_function;
+                        function<void*()> functional_wrapper;
                         ANY_OUTPUT_TYPE output;
                         ANY_INPUT_TYPE arguments;
+                        bool use_lambda = false;
                         bool has_been_waited_on = true; // by deafult the task is ready to start
-                    // Constructor
-                        Task(ANY_OUTPUT_TYPE (*input_function)(ANY_INPUT_TYPE argument))
+                    // Constructors
+                        TaskClass(const TaskClass &obj)
+                            {
+                                Error("Something somewhere is trying to copy a TaskClass() object. Sadly copying a TaskClass is not yet possible.\nThis is likely happening when trying to add a task to a vector or some similar operation.\nThis can often be fixed by using a TaskClass pointer instead");
+                            }
+                        TaskClass(function<ANY_OUTPUT_TYPE(ANY_INPUT_TYPE argument)> input_function, ANY_INPUT_TYPE input_arguments)
+                            {
+                                use_lambda = true;
+                                lambda_thread_function = input_function;
+                                arguments = input_arguments;
+                            }
+                        TaskClass(ANY_OUTPUT_TYPE (*input_function)(ANY_INPUT_TYPE argument))
                             {
                                 thread_function = input_function;
                             }
-                        Task(ANY_OUTPUT_TYPE (*input_function)(ANY_INPUT_TYPE argument), ANY_INPUT_TYPE input_arguments)
+                        TaskClass(ANY_OUTPUT_TYPE (*input_function)(ANY_INPUT_TYPE argument), ANY_INPUT_TYPE input_arguments)
                             {
                                 thread_function = input_function;
                                 arguments = ANY_INPUT_TYPE(input_arguments);
@@ -1741,53 +1792,29 @@
                                 // if its possible the task is still running
                                 if (has_been_waited_on == false) 
                                     {
-                                        cout << "for task with id = " << thread << "\n";
+                                        cout << "for task with address = " << this << "\n";
                                         cout << "I think you're trying to start this task but it hasn't been waited on yet.\n";
                                         cout << "either do the_task.WaitForCompletion() before trying to restart this task, or create a seperate task object\n";
                                         return;
                                     }
                                 // if the task wasnt running before, it is now
                                 has_been_waited_on = false;
-                                // create a lambda function to act as a wrapper, then convert it into a function pointer 
-                                auto wrapper_function = convertToFunctionPointer<void * _Nullable(void*)>(
-                                    // lambda function
-                                    [&](void* input) -> void* {
+                                functional_wrapper = function<void*()>([&]() mutable -> void* {
                                         // give the input arguments (stored on the the task object) to the function
                                         // and save the output to the task object
-                                        output = thread_function(arguments);
+                                        if (use_lambda)
+                                            {
+                                                output = lambda_thread_function(arguments);
+                                            }
+                                        else
+                                            {
+                                                output = thread_function(arguments);
+                                            }
+                                        has_been_waited_on = true;
                                         pthread_exit(NULL);
                                         return NULL;
-                                    }
-                                );
-                                pthread_create(&thread, attributes, wrapper_function, NULL);
-                            }
-                        void RunWith(ANY_INPUT_TYPE input_arguments, const pthread_attr_t* attributes=NULL)
-                            {
-                                // save a copy of the arguments to the task object 
-                                // to ensure they exist for the duration of the task
-                                arguments = ANY_INPUT_TYPE(input_arguments);
-                                // if its possible the task is still running
-                                if (has_been_waited_on == false)
-                                    {
-                                        cout << "for task with id = " << thread << "\n";
-                                        cout << "I think you're trying to start this task but it hasn't been waited on yet.\n";
-                                        cout << "either do the_task.WaitForCompletion() before trying to restart this task, or create a seperate task object\n";
-                                        return;
-                                    }
-                                // if the task wasnt running before, it is now
-                                has_been_waited_on = false;
-                                // create a lambda function to act as a wrapper, then convert it into a function pointer 
-                                auto wrapper_function = convertToFunctionPointer<void * _Nullable(void*)>(
-                                    // lambda function
-                                    [&](void* input) -> void* {
-                                        // give the input arguments (stored on the the task object) to the function
-                                        // and save the output to the task object
-                                        output = thread_function(arguments);
-                                        pthread_exit(NULL);
-                                        return NULL;
-                                    }
-                                );
-                                pthread_create(&thread, attributes, wrapper_function, NULL);
+                                    });
+                                pthread_create(&thread, attributes, thread_stub, &functional_wrapper);
                             }
                         ANY_OUTPUT_TYPE WaitForCompletion()
                             {
@@ -1799,6 +1826,104 @@
                                 return output;
                             }
                 };
+            pthread_t __dummy_thread;
+            template <class ANY_OUTPUT_TYPE, class ANY_INPUT_TYPE>
+            class Task
+                {
+                // summary/explaination:
+                    // This is just a wrapper for a TaskClass pointer
+                    // it is created so that copies (shallow copies) can be made without breaking everything and causing a segfault
+                    // it keeps track of how many shallow copies there are for a proticular task and once the last shallow copy is destroyed it deletes the original TaskClass obj/pointer to prevent memoryleaks
+                public:
+                    // data
+                        static map<TaskClass<ANY_OUTPUT_TYPE, ANY_INPUT_TYPE>*, int> links_to;
+                        TaskClass<ANY_OUTPUT_TYPE, ANY_INPUT_TYPE>* ptr_to_original = nullptr;
+                        pthread_t& thread;
+                    // constructors
+                        Task() : thread(__dummy_thread)
+                            {
+                            }
+                        Task(TaskClass<ANY_OUTPUT_TYPE, ANY_INPUT_TYPE>* a_task_ptr) : thread(__dummy_thread)
+                            {
+                                ptr_to_original = a_task_ptr;
+                                // if no links
+                                if (links_to.find(ptr_to_original) == links_to.end())
+                                    {
+                                        // then set the initial number of links to 0
+                                        links_to[ptr_to_original] = 0;
+                                    }
+                                // add one link
+                                ++links_to[ptr_to_original];
+                                thread = a_task_ptr->thread;
+                            }
+                        Task(const Task &obj) : thread(__dummy_thread)
+                            {
+                                ptr_to_original = obj.ptr_to_original;
+                                thread = obj.ptr_to_original->thread;
+                                // if no links
+                                if (links_to.find(ptr_to_original) == links_to.end())
+                                    {
+                                        // then set the initial number of links to 0
+                                        links_to[ptr_to_original] = 0;
+                                    }
+                                // add one link
+                                ++links_to[ptr_to_original];
+                            }
+                        ~Task()
+                            {
+                                // decrement one link
+                                --links_to[ptr_to_original];
+                                // if no links, then delete
+                                if (links_to[ptr_to_original] == 0)
+                                    {
+                                        delete ptr_to_original;
+                                    }
+                            }
+                    // methods
+                        void SetOriginal(TaskClass<ANY_OUTPUT_TYPE, ANY_INPUT_TYPE>* a_pointer)
+                            {
+                                ptr_to_original = a_pointer;
+                                ++links_to[ptr_to_original];
+                                thread = &(a_pointer->thread);
+                            }
+                        void Start(const pthread_attr_t* attributes=NULL)
+                            {
+                                if (ptr_to_original == nullptr)
+                                    {
+                                        ThreadSafeCout("You're tring to start a Task object, but its pointer points to nullptr\nThe address of the object is: " << this << "\n");
+                                    }
+                                else
+                                    {
+                                        ptr_to_original->Start();
+                                    }
+                            }
+                        ANY_OUTPUT_TYPE WaitForCompletion()
+                            {
+                                return ptr_to_original->WaitForCompletion();
+                            }
+                        bool StillRunning()
+                            {
+                                return not ptr_to_original->has_been_waited_on;
+                            }
+                    // operators
+                        Task& operator=( const Task& obj )
+                            {
+                                ptr_to_original = obj.ptr_to_original;
+                                thread = obj.ptr_to_original->thread;
+                                // if no links
+                                if (links_to.find(ptr_to_original) == links_to.end())
+                                    {
+                                        // then set the initial number of links to 0
+                                        links_to[ptr_to_original] = 0;
+                                    }
+                                // add one link
+                                ++links_to[ptr_to_original];
+                                return this;
+                            }
+                };
+            template <class ANY_OUTPUT_TYPE, class ANY_INPUT_TYPE> map<TaskClass<ANY_OUTPUT_TYPE, ANY_INPUT_TYPE>*, int> Task<ANY_OUTPUT_TYPE, ANY_INPUT_TYPE>::links_to;
+            // have the TaskClass automatically detect the argument and return type
+            #define Task(FUNC, ARG) Task<decltype(FUNC(decltype(ARG){})), decltype(ARG)>(new TaskClass<decltype(FUNC(decltype(ARG){})), decltype(ARG)>(FUNC, ARG));
                 // Helpers
                 void* WaitFor(pthread_t thread)
                     {
@@ -1806,6 +1931,39 @@
                         pthread_join(thread, output);
                         return (void*)output;
                     }
+            class LockManagerClass
+                {
+                public:
+                    // data
+                        map<void*, pthread_mutex_t> map_of_locks;
+                    // methods
+                        void Lock(void* varaible_address)
+                            {
+                                // if there isn't a mutex for the address, then make one
+                                if (map_of_locks.find(varaible_address) == map_of_locks.end())
+                                    {
+                                        // make a mutex
+                                        map_of_locks[varaible_address] = PTHREAD_MUTEX_INITIALIZER;
+                                    }
+                                // lock the mutex
+                                pthread_mutex_lock(&(map_of_locks[varaible_address]));
+                            }
+                        void Unlock(void* varaible_address)
+                            {
+                                // If there isn't a mutex for the var, then do nothing
+                                if (map_of_locks.find(varaible_address) == map_of_locks.end())
+                                    {
+                                        return;
+                                    }
+                                // unlock the mutex 
+                                else
+                                    {
+                                        pthread_mutex_unlock(&(map_of_locks[varaible_address]));
+                                    }
+                            }
+                } LockManager;
+                #define Lock(ARGS) LockManager.Lock((void*)(&ARGS))
+                #define Unlock(ARGS) LockManager.Unlock((void*)(&ARGS))
 //////////////////////
 //
 // Secondary helper functions
@@ -2268,6 +2426,7 @@
         // how to get class names 
             // derived this from 
             // http://stackoverflow.com/questions/3649278/how-can-i-get-the-class-name-from-a-c-object
+            // FIXME, I think this can be replaced with typeid() from #include <typeinfo> https://stackoverflow.com/questions/11310898/how-do-i-get-the-type-of-a-variable#11310937
             #include <cxxabi.h>
             template <class ANYTYPE>
             string Type(ANYTYPE input)
@@ -3328,7 +3487,7 @@
     #define puts        __PutsOutputFixerStream,
     #define put_lines   __PutLinesOutputFixerStream.reset();__PutLinesOutputFixerStream,
     // and print is puts without a newline
-    #define print       cout,
+    #define Print       cout,
 
     // log is an incredibly useful Debugging tool
     string __OUTPUT_INDENT = "";
@@ -3428,7 +3587,6 @@
     stringstream __PutsOutputFixerStream;
     __PutLinesOutputFixerStreamClass __PutLinesOutputFixerStream;
     __PutLinesOutputFixerStreamClass __LogOutputFixerStream;
-    
     // for normal input (classes)
     template<class ANYTYPE>
     inline ostream& operator,(ostream& o, const ANYTYPE& value) 
@@ -3436,10 +3594,13 @@
             // if its the puts stream then output each thing with a newline after it
             if (&o == &__PutsOutputFixerStream)
                 {
+                    // make this threadsafe by only allowing one printout at a time
+                    pthread_mutex_lock(&mutex_for_output);
                     // put the value into the string stream 
-                    __PutsOutputFixerStream << value;
+                    stringstream converter_to_string;
+                    converter_to_string << value;
                     // get the output as a string
-                    string content_being_output = __PutsOutputFixerStream.str();
+                    string content_being_output = converter_to_string.str();
                     // insert the indent at the begining
                     cout << __OUTPUT_INDENT;
                     // insert the indent after every newline in the content
@@ -3453,6 +3614,8 @@
                         }
                     // send a newline at the end
                     cout << "\n";
+                    // unlock the mutex to allow other threads to print things out;
+                    pthread_mutex_unlock(&mutex_for_output);
                 }
             // if its the __PutLinesOutputFixerStream, then use __PutLinesOutputFixerStream to output
             else if (&o == &__PutLinesOutputFixerStream)
