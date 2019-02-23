@@ -1,2 +1,2 @@
 # Ceko
-Fixing C++ one #define at a time
+A bunch of helper tools I've collected. Maybe I'll clean them up eventually.
